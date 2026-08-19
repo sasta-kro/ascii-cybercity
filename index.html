@@ -806,7 +806,8 @@ var CC = (function () {
 (function (CC) {
   'use strict';
 
-  var P = CC.P, g = CC.g, hash2 = CC.hash2, clamp = CC.clamp, vnoise = CC.vnoise;
+  var P = CC.P, g = CC.g, hash2 = CC.hash2, clamp = CC.clamp, smooth = CC.smooth,
+      vnoise = CC.vnoise;
 
   var G_DOT = g('.'), G_COMMA = g(','), G_COLON = g(':'), G_SEMI = g(';'), G_QUOTE = g("'"),
       G_TICK = g('`'), G_DASH = g('-'), G_UNDER = g('_'), G_EQ = g('='), G_PLUS = g('+'),
@@ -1198,6 +1199,8 @@ var CC = (function () {
 
     var fl = dist < 22 ? 2 : (dist < 50 ? 1 : 0);
 
+    var farKeep = smooth(clamp((82 - dist) / 32, 0, 1));
+
     var sheet = vnoise(wx * 0.11 + 3.1, 91) * 0.72 + vnoise(wz * 0.05, 57) * 0.62
               - 0.42 + (wWet - 1) * 0.34;
     sheet = clamp(sheet, 0, 1) * clamp(wWet, 0, 1.15);
@@ -1222,14 +1225,13 @@ var CC = (function () {
     rut = 1 - clamp(rut / 0.62, 0, 1);
 
     var lampK = 0;
-    if (fl > 0) {
-      var lj = Math.floor(wz / 13.5);
-      var lcl = (hash2(lj, 0, 0x1A3) < 0.5 ? 1 : -1) * (half - 0.55);
-      var lcz = lj * 13.5 + 3.4 + hash2(lj, 1, 0x1A3) * 6.6;
-      var dll = (lane - lcl) / 3.0, dlpz = (wz - lcz) / 4.1;
-      lampK = 1 - (dll * dll + dlpz * dlpz);
-      if (lampK < 0) lampK = 0; else lampK *= lampK;
-    }
+
+    var lj = Math.floor(wz / 13.5);
+    var lcl = (hash2(lj, 0, 0x1A3) < 0.5 ? 1 : -1) * (half - 0.55);
+    var lcz = lj * 13.5 + 3.4 + hash2(lj, 1, 0x1A3) * 6.6;
+    var dll = (lane - lcl) / 3.0, dlpz = (wz - lcz) / 4.1;
+    lampK = 1 - (dll * dll + dlpz * dlpz);
+    if (lampK < 0) lampK = 0; else lampK *= lampK;
 
     mirNow = clamp(pd * 0.95 + sheet * (0.40 + rut * 0.26), 0, 1);
 
@@ -1337,9 +1339,9 @@ var CC = (function () {
     if (!inX && al > half + 0.34) {
 
       mirNow *= 0.35; bounceNow = 0.05;
-      if (fl === 0) return rset(0, P.shadow, 0);
+      if (fl === 0 && farKeep <= 0) return rset(0, P.shadow, 0);
 
-      if (CFG.xn > 0 && xd > xh - 0.2 && xd < xh + 2.4 && al < half + 2.2) {
+      if (fl > 0 && CFG.xn > 0 && xd > xh - 0.2 && xd < xh + 2.4 && al < half + 2.2) {
         var tp = hash2(Math.floor(wx * 3.4), Math.floor(wz * 3.4), 0x2D3);
         if (tp < 0.38) return rset(G_oo, P.slate, 15 + tp * 34);
         return rset(0, P.shadow, 0);
@@ -1357,12 +1359,14 @@ var CC = (function () {
 
       var jp = fl === 2 ? 1.25 : 2.50, jw = fl === 2 ? 0.09 : 0.17;
       var jx = wx - Math.floor(wx / jp) * jp, jz = wz - Math.floor(wz / jp) * jp;
-      if (jx < jw || jz < jw) return rset(G_COLON, P.slate, fl === 2 ? 15 : 11);
+      if (jx < jw || jz < jw)
+        return rset(G_COLON, P.slate, (fl === 2 ? 15 : 11) * (fl === 0 ? farKeep : 1));
 
       var ps = hash2(Math.floor(wx * (fl === 2 ? 1.6 : 0.8)),
                      Math.floor(wz * (fl === 2 ? 1.6 : 0.8)), 0x2F);
       if (ps < (fl === 2 ? 0.30 : 0.15))
-        return rset(ps < 0.15 ? G_DOT : G_COMMA, P.slate, (fl === 2 ? 7 : 6) + ps * 20);
+        return rset(ps < 0.15 ? G_DOT : G_COMMA, P.slate,
+                    ((fl === 2 ? 7 : 6) + ps * 20) * (fl === 0 ? farKeep : 1));
       return rset(0, P.shadow, 0);
     }
 
@@ -1420,12 +1424,12 @@ var CC = (function () {
     if (fl > 0 && (wz - Math.floor(wz / 4.0) * 4.0) < 0.10)
       return rset(G_DASH, P.slate, 16);
 
-    if (lampK > 0.05 && fl > 0) {
-      var lh = hash2(Math.floor(wx * (fl === 2 ? 2.1 : 1.0)),
-                     Math.floor(wz * (fl === 2 ? 2.1 : 1.0)), 0x1A5);
+    if (lampK > 0.05 && farKeep > 0) {
+
+      var lh = hash2(Math.floor(wx), Math.floor(wz), 0x1A5);
       if (lh < 0.24 + lampK * 0.40)
         return rset(lh < 0.5 ? G_DOT : G_COMMA, P.amber,
-                    112 + lampK * 118 + lh * 26 + mirNow * 44);
+                    (112 + lampK * 118 + lh * 26 + mirNow * 44) * farKeep);
     }
 
     if (pd > 0.015 && pd < 0.30) {
@@ -1446,7 +1450,7 @@ var CC = (function () {
                     wg < 0.055 ? 48 + mirNow * 50 : 8 + mirNow * 30 + wg * 14);
     }
 
-    if (fl === 0) return rset(0, P.shadow, 0);
+    if (fl === 0 && farKeep <= 0) return rset(0, P.shadow, 0);
 
     var qi = Math.floor(lane / 2.6), qj = Math.floor(wz / 3.4);
     var patch = hash2(qi, qj, 0x7A9) < 0.30;
@@ -1457,9 +1461,10 @@ var CC = (function () {
         return rset(el2 < 0.09 || el2 > 2.51 ? G_PIPE : G_DASH, P.slate, 13);
     }
 
-    if (fl === 1) {
+    if (fl < 2) {
       var mh = hash2(Math.floor(wx * 0.9), Math.floor(wz * 0.9), 0x12);
-      return mh < 0.23 ? rset(mh < 0.11 ? G_DOT : G_COMMA, P.slate, 13 + mh * 40)
+      return mh < 0.23 ? rset(mh < 0.11 ? G_DOT : G_COMMA, P.slate,
+                              (13 + mh * 40) * (fl === 0 ? farKeep : 1))
                        : rset(0, P.shadow, 0);
     }
     var ah = hash2(Math.floor(wx * 2.2), Math.floor(wz * 2.2), 0x12);

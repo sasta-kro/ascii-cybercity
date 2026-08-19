@@ -33,7 +33,8 @@
 (function (CC) {
   'use strict';
 
-  var P = CC.P, g = CC.g, hash2 = CC.hash2, clamp = CC.clamp, vnoise = CC.vnoise;
+  var P = CC.P, g = CC.g, hash2 = CC.hash2, clamp = CC.clamp, smooth = CC.smooth,
+      vnoise = CC.vnoise;
 
   /* Glyph indices resolved once — g() is a string-keyed lookup and this runs cols*rows times. */
   var G_DOT = g('.'), G_COMMA = g(','), G_COLON = g(':'), G_SEMI = g(';'), G_QUOTE = g("'"),
@@ -701,6 +702,12 @@
      * (centreline, kerb, edge line, rails, crossings) are kept at every distance — they are what
      * carries the perspective, and they are lines rather than fields so they cannot alias. */
     var fl = dist < 22 ? 2 : (dist < 50 ? 1 : 0);
+    /* `fl` decides how much DETAIL the floor can afford, not whether the floor exists. The old
+     * fl===0 branches returned pure black at 50 m and disabled the broad lamp pools at the same
+     * boundary. That made a whole strip of street switch on as the camera crossed it. Hold the
+     * mid-distance mass at full strength through 50 m, then retire it over another 32 m. smooth()
+     * leaves zero slope at both ends, and fog() below still owns the final fade into the city. */
+    var farKeep = smooth(clamp((82 - dist) / 32, 0, 1));
 
     /* ---- water ---------------------------------------------------------------------------
      * Two scales, doing two different jobs.
@@ -757,14 +764,15 @@
      *
      * Squared falloff and no edge — light does not have one. */
     var lampK = 0;
-    if (fl > 0) {
-      var lj = Math.floor(wz / 13.5);
-      var lcl = (hash2(lj, 0, 0x1A3) < 0.5 ? 1 : -1) * (half - 0.55);
-      var lcz = lj * 13.5 + 3.4 + hash2(lj, 1, 0x1A3) * 6.6;
-      var dll = (lane - lcl) / 3.0, dlpz = (wz - lcz) / 4.1;
-      lampK = 1 - (dll * dll + dlpz * dlpz);
-      if (lampK < 0) lampK = 0; else lampK *= lampK;
-    }
+    /* A lamp pool is four metres across, so it is a silhouette-scale feature rather than texture
+     * detail. It remains cheap and stable in the far band because every input below is in WORLD
+     * space; farKeep and the normal fog pass dissolve it instead of a camera-distance switch. */
+    var lj = Math.floor(wz / 13.5);
+    var lcl = (hash2(lj, 0, 0x1A3) < 0.5 ? 1 : -1) * (half - 0.55);
+    var lcz = lj * 13.5 + 3.4 + hash2(lj, 1, 0x1A3) * 6.6;
+    var dll = (lane - lcl) / 3.0, dlpz = (wz - lcz) / 4.1;
+    lampK = 1 - (dll * dll + dlpz * dlpz);
+    if (lampK < 0) lampK = 0; else lampK *= lampK;
 
     mirNow = clamp(pd * 0.95 + sheet * (0.40 + rut * 0.26), 0, 1);
     /* The DRY BOUNCE, kept separate from the water because the two do different jobs and only one
@@ -969,10 +977,10 @@
       /* Standing water does not sit on a crowned pavement the way it sits in a gutter, and a
        * pavement is a metre out of the light a shopfront throws down its own frontage. */
       mirNow *= 0.35; bounceNow = 0.05;
-      if (fl === 0) return rset(0, P.shadow, 0);
+      if (fl === 0 && farKeep <= 0) return rset(0, P.shadow, 0);
       /* Tactile paving at a crossing mouth — a hard field of dots, the one place a pavement has a
        * texture of its own rather than a grid of joints. */
-      if (CFG.xn > 0 && xd > xh - 0.2 && xd < xh + 2.4 && al < half + 2.2) {
+      if (fl > 0 && CFG.xn > 0 && xd > xh - 0.2 && xd < xh + 2.4 && al < half + 2.2) {
         var tp = hash2(Math.floor(wx * 3.4), Math.floor(wz * 3.4), 0x2D3);
         if (tp < 0.38) return rset(G_oo, P.slate, 15 + tp * 34);
         return rset(0, P.shadow, 0);
@@ -996,12 +1004,13 @@
        *
        * They used to stop dead at 22 m, which is to say they stopped exactly where perspective
        * begins to do the work: everything from there to the horizon was a black band with no
-       * scale in it at all. The grid now runs to 50 m on a doubled pitch, because past 22 m one
-       * screen row covers more than a metre of slab and the 1.25 m grid aliases into a moire
-       * that crawls as you walk. */
+       * scale in it at all. The grid runs at full strength to 50 m on a doubled pitch and then
+       * follows farKeep out, because past 22 m one screen row covers more than a metre of slab and
+       * the 1.25 m grid aliases into a moire that crawls as you walk. */
       var jp = fl === 2 ? 1.25 : 2.50, jw = fl === 2 ? 0.09 : 0.17;
       var jx = wx - Math.floor(wx / jp) * jp, jz = wz - Math.floor(wz / jp) * jp;
-      if (jx < jw || jz < jw) return rset(G_COLON, P.slate, fl === 2 ? 15 : 11);
+      if (jx < jw || jz < jw)
+        return rset(G_COLON, P.slate, (fl === 2 ? 15 : 11) * (fl === 0 ? farKeep : 1));
       /* The slabs BETWEEN the joints. A grid of joints on black is a wireframe, not a pavement —
        * it needs a surface to be the joints in. Quantised so it is stone and not per-cell salt,
        * and kept well under the joints' own value so the grid still leads. The far band gets a
@@ -1010,7 +1019,8 @@
       var ps = hash2(Math.floor(wx * (fl === 2 ? 1.6 : 0.8)),
                      Math.floor(wz * (fl === 2 ? 1.6 : 0.8)), 0x2F);
       if (ps < (fl === 2 ? 0.30 : 0.15))
-        return rset(ps < 0.15 ? G_DOT : G_COMMA, P.slate, (fl === 2 ? 7 : 6) + ps * 20);
+        return rset(ps < 0.15 ? G_DOT : G_COMMA, P.slate,
+                    ((fl === 2 ? 7 : 6) + ps * 20) * (fl === 0 ? farKeep : 1));
       return rset(0, P.shadow, 0);
     }
 
@@ -1104,12 +1114,13 @@
      * area of nothing, so the trade is less forced than it was — it is kept because a sodium pool
      * under a lamp IS the brightest thing on a wet road, not because the alternative prints black.
      * Wet tarmac under a lamp is brighter again, hence the mirror term. */
-    if (lampK > 0.05 && fl > 0) {
-      var lh = hash2(Math.floor(wx * (fl === 2 ? 2.1 : 1.0)),
-                     Math.floor(wz * (fl === 2 ? 2.1 : 1.0)), 0x1A5);
+    if (lampK > 0.05 && farKeep > 0) {
+      /* One-metre bins at every distance. Changing this lattice at 22 m used to reshuffle the
+       * pool once more after it had appeared at 50 m; a broad light does not need a near LOD. */
+      var lh = hash2(Math.floor(wx), Math.floor(wz), 0x1A5);
       if (lh < 0.24 + lampK * 0.40)
         return rset(lh < 0.5 ? G_DOT : G_COMMA, P.amber,
-                    112 + lampK * 118 + lh * 26 + mirNow * 44);
+                    (112 + lampK * 118 + lh * 26 + mirNow * 44) * farKeep);
     }
 
     /* ---- water on the tarmac ----------------------------------------------------------------
@@ -1173,7 +1184,7 @@
      * blacktop and the EDGES of those patches are what the eye reads; a single even tone over the
      * whole lower third is the thing that made it a void. Blocky on purpose — road repairs are
      * rectangles — and jittered on the lattice so the blocks are not a visible grid. */
-    if (fl === 0) return rset(0, P.shadow, 0);
+    if (fl === 0 && farKeep <= 0) return rset(0, P.shadow, 0);
 
     var qi = Math.floor(lane / 2.6), qj = Math.floor(wz / 3.4);
     var patch = hash2(qi, qj, 0x7A9) < 0.30;
@@ -1216,9 +1227,13 @@
      * spandrel salt. They are not the largest surface in the frame, the muddy budget does not
      * stretch to the whole floor, and a swatch-wide correction belongs in EXPOSURE, not in forty
      * literals here. If slate's gain moves again, this block is the first thing to re-measure. */
-    if (fl === 1) {
+    /* The far band reuses the mid band's lattice and coverage, and changes only its brightness.
+     * That identity across 50 m is what removes the old switch: the same world cell carries the
+     * same glyph on both sides while farKeep and fog retire it continuously. */
+    if (fl < 2) {
       var mh = hash2(Math.floor(wx * 0.9), Math.floor(wz * 0.9), 0x12);
-      return mh < 0.23 ? rset(mh < 0.11 ? G_DOT : G_COMMA, P.slate, 13 + mh * 40)
+      return mh < 0.23 ? rset(mh < 0.11 ? G_DOT : G_COMMA, P.slate,
+                              (13 + mh * 40) * (fl === 0 ? farKeep : 1))
                        : rset(0, P.shadow, 0);
     }
     var ah = hash2(Math.floor(wx * 2.2), Math.floor(wz * 2.2), 0x12);
