@@ -904,6 +904,23 @@ var CC = (function () {
     return FOUT;
   }
 
+  function blindWall(u, v, sd, lod) {
+    var px = Math.floor(u * 1.35), py = Math.floor(v * 1.05);
+    var fu = u * 1.35 - px, fv = v * 1.05 - py;
+
+    if (fu < 0.075 || fv < 0.085) return fset(0, P.shadow, 0);
+
+    var h = hash2(px, py, sd ^ 0x4B1D);
+
+    if (h < 0.075)
+      return fset(h < 0.025 ? G_DOT : (fu < 0.16 ? G_PIPE : G_UNDER),
+                  P.shadow, 22 + h * 120);
+
+    var ch = h < 0.24 ? G_COLON : (h < 0.48 ? G_UNDER : (h < 0.72 ? G_EQ : G_0));
+    var base = lod === 2 ? 38 : (lod === 1 ? 30 : 23);
+    return fset(ch, P.slate, base + h * (lod === 2 ? 25 : 18));
+  }
+
   function grain(u, v, sd, lod) {
     if (lod < 2) return 1;
     var h = hash2(Math.floor(u * 11), Math.floor(v * 11), sd ^ 0x6A11);
@@ -950,9 +967,7 @@ var CC = (function () {
       return fset(dg < 0.13 ? G_O : G_PIPE, P.slate, 13 + dg * 20);
     }
 
-    if (hash2(wu >> 1, wv >> 1, sd ^ 0x1F35) < 0.18) {
-      return fset(0, P.shadow, 0);
-    }
+    var darkBlock = hash2(wu >> 1, wv >> 1, sd ^ 0x1F35) < 0.18;
 
     if (lod > 0) {
       var ge = u / CFG.grid; ge -= Math.floor(ge);
@@ -964,6 +979,8 @@ var CC = (function () {
     if (fv < 0.11 && (wv % st.band) === 0 && hash2(wu, wv, sd ^ 0xB2) < 0.72) {
       return fset(G_EQ, P.slate, 12 + hash2(wu, wv, sd ^ 0xB1) * 16);
     }
+
+    if (darkBlock) return blindWall(u, v, sd, lod);
 
     var pcol = 0.35 + 1.30 * hash2(bu, 0, sd ^ 0x71);
     var prow = 0.45 + 1.10 * hash2(0, bv, sd ^ 0x37);

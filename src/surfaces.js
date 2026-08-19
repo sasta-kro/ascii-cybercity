@@ -174,6 +174,35 @@
     return FOUT;
   }
 
+  /* A blind wall still has to say WALL. The old dark-block branch returned glyph 0 for every
+   * sample in a two-bay by two-storey patch, so close walls became screen-sized holes with no
+   * distinction from an open street. This is cladding rather than light: cold slate at the bottom
+   * of the visible range, broken by black expansion joints and the occasional recessed panel.
+   *
+   * The lattice is in WORLD metres. Keying either seam to a screen row or column would weld the
+   * pattern to the camera and make the panels crawl over the facade while the viewer walked. */
+  function blindWall(u, v, sd, lod) {
+    var px = Math.floor(u * 1.35), py = Math.floor(v * 1.05);
+    var fu = u * 1.35 - px, fv = v * 1.05 - py;
+    /* Pure black survives as structure, not acreage: narrow joints round each cladding panel. */
+    if (fu < 0.075 || fv < 0.085) return fset(0, P.shadow, 0);
+
+    var h = hash2(px, py, sd ^ 0x4B1D);
+    /* A missing or deeply inset panel is allowed, but isolated on the finer lattice above so it
+     * can never reconstruct the old multi-bay rectangle. A dim edge keeps even this recess tied
+     * to the wall around it. */
+    if (h < 0.075)
+      return fset(h < 0.025 ? G_DOT : (fu < 0.16 ? G_PIPE : G_UNDER),
+                  P.shadow, 22 + h * 120);
+
+    /* Dense glyphs carry the material; thin ones leave enough black inside it for the surface to
+     * stay cyberpunk rather than turning into a flat blue fill. Near panels get the clearest read,
+     * while distance and the normal fog pass retire them back into the silhouette. */
+    var ch = h < 0.24 ? G_COLON : (h < 0.48 ? G_UNDER : (h < 0.72 ? G_EQ : G_0));
+    var base = lod === 2 ? 38 : (lod === 1 ? 30 : 23);
+    return fset(ch, P.slate, base + h * (lod === 2 ? 25 : 18));
+  }
+
   /* Dirt, streaking and reflection at ~8 cm — the only detail that survives when a wall is
    * four metres away and one bay covers thirty columns. Keyed on quantised WORLD coordinates,
    * so it is welded to the building and cannot crawl as the camera advances. */
@@ -256,16 +285,10 @@
       return fset(dg < 0.13 ? G_O : G_PIPE, P.slate, 13 + dg * 20);   // brackets every metre or so
     }
 
-    /* Dark blocks: derelict floors, empty lets, the shadowed half of a plant room. These are
-     * where the 55%-black budget comes from, and being 4 bays wide they read as mass rather
-     * than as holes punched in a lattice. */
-    /* Grain matters as much as probability here. At >>2 the mask worked in four-bay by two-storey
-     * blocks, which on a wall seven metres away is a twenty-by-twenty pure-black rectangle with
-     * hard edges — not mass, a hole cut in the building. Halving the horizontal grain and cutting
-     * the rate keeps the derelict floors while letting the wall stay a wall up close. */
-    if (hash2(wu >> 1, wv >> 1, sd ^ 0x1F35) < 0.18) {
-      return fset(0, P.shadow, 0);
-    }
+    /* Dark blocks: derelict floors, empty lets, the shadowed half of a plant room. The coarse mask
+     * groups them into two-bay by two-storey masses, but the returned SURFACE uses a finer metre
+     * lattice: the condition may be broad, the black inside it may not be. */
+    var darkBlock = hash2(wu >> 1, wv >> 1, sd ^ 0x1F35) < 0.18;
 
     /* Corner rib. Buildings sit on the city grid, so a wall's corners are wherever u crosses a
      * grid line; the rib is brighter than the mullions so the silhouette edge stays readable. */
@@ -279,6 +302,9 @@
     if (fv < 0.11 && (wv % st.band) === 0 && hash2(wu, wv, sd ^ 0xB2) < 0.72) {
       return fset(G_EQ, P.slate, 12 + hash2(wu, wv, sd ^ 0xB1) * 16);
     }
+    /* Ribs and belt courses above cross blind sections too. Drawing them first gives the dark
+     * cladding an outline and a floor scale before its own panel texture fills the field. */
+    if (darkBlock) return blindWall(u, v, sd, lod);
 
     /* Lit windows must CLUSTER, not speckle. Biasing the threshold by a per-column and a
      * per-storey hash (both mean 1.0, so the cell's litRate still holds on average) gives
