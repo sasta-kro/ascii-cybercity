@@ -83,6 +83,18 @@
     xw: new Float64Array(8),
     xz0: 0, xpitch: 26,   // xc[0] and the city's block pitch, so the nearest entry can be INDEXED
                           // rather than searched: this runs twenty thousand times a frame
+    /* The browser city has two complete street families. The caster loads the visible members of
+     * both into these fixed arrays once per frame, then floorTex classifies every WORLD sample
+     * against them. This is deliberately separate from xc/xw above: those describe the one-canyon
+     * fallback used by the standalone surface harness, while these describe the actual city and
+     * must never depend on which road the camera happens to be standing in or looking along. */
+    worldRoads: 0,
+    an: 0, ai0: 0, apitch: 30,
+    ac: new Float64Array(16),
+    aw: new Float64Array(16),
+    cn: 0, ci0: 0, cpitch: 26,
+    cc: new Float64Array(16),
+    cw: new Float64Array(16),
     /* Whether THIS street carries tram rails. Rolled once per configure() rather than per cell:
      * a rail that appears for some cells of a street and not others is not a rail. */
     rail: 0,
@@ -690,10 +702,49 @@
 
   function floorTex(wx, wz, dist, t) {
     weatherAt(t === undefined ? 0 : t);
-    var lane = wx - CFG.streetX;
+    /* `wx,wz` arrive in WORLD space. Older builds transposed them for every floor cell when the
+     * camera committed to a perpendicular street. That made the visible cross road borrow the
+     * active road's lamp lattice, and then re-dealt the entire floor in one frame at the turn.
+     * Select a canonical corridor per WORLD sample instead. At a junction both families contain the
+     * point; avenues win that tie consistently, which keeps the junction fixed to the map rather
+     * than to the camera heading. */
+    var streetX = CFG.streetX, half = CFG.half, rail = CFG.rail;
+    var roadXD = 1e9, roadXH = 0, roadXC = 0;
+    var roadZD = 1e9, roadZH = 0, roadZC = 0;
+    var worldX = wx, worldZ = wz, i, lo, hi, d;
+    if (CFG.worldRoads) {
+      var ag = Math.round(worldX / CFG.apitch) - CFG.ai0;
+      lo = ag - 1; if (lo < 0) lo = 0;
+      hi = ag + 1; if (hi > CFG.an - 1) hi = CFG.an - 1;
+      for (i = lo; i <= hi; i++) {
+        d = worldX - CFG.ac[i]; if (d < 0) d = -d;
+        if (d < roadXD) { roadXD = d; roadXH = CFG.aw[i]; roadXC = CFG.ac[i]; }
+      }
+      var cg = Math.round(worldZ / CFG.cpitch) - CFG.ci0;
+      lo = cg - 1; if (lo < 0) lo = 0;
+      hi = cg + 1; if (hi > CFG.cn - 1) hi = CFG.cn - 1;
+      for (i = lo; i <= hi; i++) {
+        d = worldZ - CFG.cc[i]; if (d < 0) d = -d;
+        if (d < roadZD) { roadZD = d; roadZH = CFG.cw[i]; roadZC = CFG.cc[i]; }
+      }
+      var onAve = roadXD <= roadXH;
+      var onCross = roadZD <= roadZH;
+      /* Outside both corridors the only exposed ground is a pavement, service court or gap between
+       * structures. Align it with the nearer kerb so its joints meet the street beside it. */
+      var useCross = onCross && !onAve;
+      if (!onAve && !onCross) useCross = roadZD - roadZH < roadXD - roadXH;
+      if (useCross) {
+        wx = worldZ; wz = worldX;
+        streetX = roadZC; half = roadZH - 1.4; if (half < 1.6) half = 1.6;
+        rail = half > 2.7 && hash2((streetX * 4) | 0, (half * 8) | 0, 0x5A11) < 0.34 ? 1 : 0;
+      } else {
+        streetX = roadXC; half = roadXH - 1.4; if (half < 1.6) half = 1.6;
+        rail = half > 2.7 && hash2((streetX * 4) | 0, (half * 8) | 0, 0x5A11) < 0.34 ? 1 : 0;
+      }
+    }
+    var lane = wx - streetX;
     if (CFG.streetPeriod > 0) lane -= Math.round(lane / CFG.streetPeriod) * CFG.streetPeriod;
     var al = lane < 0 ? -lane : lane;
-    var half = CFG.half;
 
     /* The floor is the worst aliaser in the frame: one row near the horizon covers tens of
      * metres of tarmac, so fine per-metre hashes there resolve into crawling static. Detail is
@@ -756,15 +807,15 @@
      * this is what they land on.
      *
      * Squared falloff and no edge — light does not have one. */
-    var lampK = 0;
-    if (fl > 0) {
-      var lj = Math.floor(wz / 13.5);
-      var lcl = (hash2(lj, 0, 0x1A3) < 0.5 ? 1 : -1) * (half - 0.55);
-      var lcz = lj * 13.5 + 3.4 + hash2(lj, 1, 0x1A3) * 6.6;
-      var dll = (lane - lcl) / 3.0, dlpz = (wz - lcz) / 4.1;
-      lampK = 1 - (dll * dll + dlpz * dlpz);
-      if (lampK < 0) lampK = 0; else lampK *= lampK;
-    }
+    /* A lamp pool is a broad world-space feature, not fine texture. It remains present through the
+     * far LOD and the normal fog pass retires it with the rest of the city. Cutting it at an
+     * arbitrary camera distance is what made a road switch on while the camera approached it. */
+    var lj = Math.floor(wz / 13.5);
+    var lcl = (hash2(lj, 0, 0x1A3) < 0.5 ? 1 : -1) * (half - 0.55);
+    var lcz = lj * 13.5 + 3.4 + hash2(lj, 1, 0x1A3) * 6.6;
+    var dll = (lane - lcl) / 3.0, dlpz = (wz - lcz) / 4.1;
+    var lampK = 1 - (dll * dll + dlpz * dlpz);
+    if (lampK < 0) lampK = 0; else lampK *= lampK;
 
     mirNow = clamp(pd * 0.95 + sheet * (0.40 + rut * 0.26), 0, 1);
     /* The DRY BOUNCE, kept separate from the water because the two do different jobs and only one
@@ -792,8 +843,15 @@
     /* ---- where the cross streets cut this one ---------------------------------------------
      * A junction is the only place a street's markings STOP, and stopping them is most of what
      * makes a junction read as one. Loaded by the caster; with none loaded the road runs on. */
-    var xd = 1e9, xh = 0, xcv = 0, i, ad2;
-    if (CFG.xn > 0) {
+    var xd = 1e9, xh = 0, xcv = 0, ad2;
+    if (CFG.worldRoads) {
+      /* In canonical avenue space, cross streets cut along world z. In canonical cross-street
+       * space, avenues cut along world x. The values were found before the optional transpose, so
+       * no second city lookup is needed here. */
+      if (!useCross) { xd = roadZD; xh = roadZH - 1.4; xcv = roadZC; }
+      else { xd = roadXD; xh = roadXH - 1.4; xcv = roadXC; }
+      if (xh < 1.6) xh = 1.6;
+    } else if (CFG.xn > 0) {
       /* The entries are evenly pitched to within city.js's own jitter, so the index of the nearest
        * is arithmetic and only its two neighbours need testing. Scanning all eight cost 0.15 ms a
        * frame at 400x100 for an answer that was never more than one slot away from the guess. */
@@ -812,7 +870,7 @@
      * Paint sits on top of the road, so it is tested first, and none of it is ever dropped for
      * distance: these are the lines the perspective is read from. Wet paint is glossier than wet
      * tarmac, which is why none of these branches turns the mirror off. */
-    if (CFG.xn > 0) {
+    if (CFG.worldRoads || CFG.xn > 0) {
       if (inX) {
         /* Box junction. Yellow crosshatch is the one piece of road paint that is unmistakably a
          * junction from any angle, and in perspective the two diagonal families converge to two
@@ -914,7 +972,7 @@
      * that have a track. The head of a rail is polished by the wheels and is the one place on a
      * road that is genuinely specular, so it carries a white glint even dry — but only near,
      * where a glint is a glint and not a dotted line running to the horizon. */
-    if (CFG.rail && !inX) {
+    if (rail && !inX) {
       var rg = al - 0.62; if (rg < 0) rg = -rg;
       var rg2 = al - 2.06; if (rg2 < 0) rg2 = -rg2;
       if (rg < 0.055 || rg2 < 0.055) {
@@ -969,10 +1027,10 @@
       /* Standing water does not sit on a crowned pavement the way it sits in a gutter, and a
        * pavement is a metre out of the light a shopfront throws down its own frontage. */
       mirNow *= 0.35; bounceNow = 0.05;
-      if (fl === 0) return rset(0, P.shadow, 0);
       /* Tactile paving at a crossing mouth — a hard field of dots, the one place a pavement has a
        * texture of its own rather than a grid of joints. */
-      if (CFG.xn > 0 && xd > xh - 0.2 && xd < xh + 2.4 && al < half + 2.2) {
+      if (fl > 0 && (CFG.worldRoads || CFG.xn > 0) && xd > xh - 0.2 && xd < xh + 2.4 &&
+          al < half + 2.2) {
         var tp = hash2(Math.floor(wx * 3.4), Math.floor(wz * 3.4), 0x2D3);
         if (tp < 0.38) return rset(G_oo, P.slate, 15 + tp * 34);
         return rset(0, P.shadow, 0);
@@ -1104,9 +1162,10 @@
      * area of nothing, so the trade is less forced than it was — it is kept because a sodium pool
      * under a lamp IS the brightest thing on a wet road, not because the alternative prints black.
      * Wet tarmac under a lamp is brighter again, hence the mirror term. */
-    if (lampK > 0.05 && fl > 0) {
-      var lh = hash2(Math.floor(wx * (fl === 2 ? 2.1 : 1.0)),
-                     Math.floor(wz * (fl === 2 ? 2.1 : 1.0)), 0x1A5);
+    if (lampK > 0.05) {
+      /* One stable metre lattice at every LOD. A density switch here re-rolls the pool even when
+       * its position is fixed, which reads as the light itself flickering during approach. */
+      var lh = hash2(Math.floor(wx), Math.floor(wz), 0x1A5);
       if (lh < 0.24 + lampK * 0.40)
         return rset(lh < 0.5 ? G_DOT : G_COMMA, P.amber,
                     112 + lampK * 118 + lh * 26 + mirNow * 44);
@@ -1173,8 +1232,6 @@
      * blacktop and the EDGES of those patches are what the eye reads; a single even tone over the
      * whole lower third is the thing that made it a void. Blocky on purpose — road repairs are
      * rectangles — and jittered on the lattice so the blocks are not a visible grid. */
-    if (fl === 0) return rset(0, P.shadow, 0);
-
     var qi = Math.floor(lane / 2.6), qj = Math.floor(wz / 3.4);
     var patch = hash2(qi, qj, 0x7A9) < 0.30;
     if (patch && fl === 2) {
@@ -1216,7 +1273,9 @@
      * spandrel salt. They are not the largest surface in the frame, the muddy budget does not
      * stretch to the whole floor, and a swatch-wide correction belongs in EXPOSURE, not in forty
      * literals here. If slate's gain moves again, this block is the first thing to re-measure. */
-    if (fl === 1) {
+    /* Mid and far distance share one coarse world lattice. Fog is the only visibility fade, so the
+     * road surface cannot form a second camera-relative black edge inside the fog circle. */
+    if (fl < 2) {
       var mh = hash2(Math.floor(wx * 0.9), Math.floor(wz * 0.9), 0x12);
       return mh < 0.23 ? rset(mh < 0.11 ? G_DOT : G_COMMA, P.slate, 13 + mh * 40)
                        : rset(0, P.shadow, 0);

@@ -841,6 +841,14 @@ var CC = (function () {
     xw: new Float64Array(8),
     xz0: 0, xpitch: 26,
 
+    worldRoads: 0,
+    an: 0, ai0: 0, apitch: 30,
+    ac: new Float64Array(16),
+    aw: new Float64Array(16),
+    cn: 0, ci0: 0, cpitch: 26,
+    cc: new Float64Array(16),
+    cw: new Float64Array(16),
+
     rail: 0,
     skySeed: 0x5EED,
 
@@ -1191,10 +1199,43 @@ var CC = (function () {
 
   function floorTex(wx, wz, dist, t) {
     weatherAt(t === undefined ? 0 : t);
-    var lane = wx - CFG.streetX;
+
+    var streetX = CFG.streetX, half = CFG.half, rail = CFG.rail;
+    var roadXD = 1e9, roadXH = 0, roadXC = 0;
+    var roadZD = 1e9, roadZH = 0, roadZC = 0;
+    var worldX = wx, worldZ = wz, i, lo, hi, d;
+    if (CFG.worldRoads) {
+      var ag = Math.round(worldX / CFG.apitch) - CFG.ai0;
+      lo = ag - 1; if (lo < 0) lo = 0;
+      hi = ag + 1; if (hi > CFG.an - 1) hi = CFG.an - 1;
+      for (i = lo; i <= hi; i++) {
+        d = worldX - CFG.ac[i]; if (d < 0) d = -d;
+        if (d < roadXD) { roadXD = d; roadXH = CFG.aw[i]; roadXC = CFG.ac[i]; }
+      }
+      var cg = Math.round(worldZ / CFG.cpitch) - CFG.ci0;
+      lo = cg - 1; if (lo < 0) lo = 0;
+      hi = cg + 1; if (hi > CFG.cn - 1) hi = CFG.cn - 1;
+      for (i = lo; i <= hi; i++) {
+        d = worldZ - CFG.cc[i]; if (d < 0) d = -d;
+        if (d < roadZD) { roadZD = d; roadZH = CFG.cw[i]; roadZC = CFG.cc[i]; }
+      }
+      var onAve = roadXD <= roadXH;
+      var onCross = roadZD <= roadZH;
+
+      var useCross = onCross && !onAve;
+      if (!onAve && !onCross) useCross = roadZD - roadZH < roadXD - roadXH;
+      if (useCross) {
+        wx = worldZ; wz = worldX;
+        streetX = roadZC; half = roadZH - 1.4; if (half < 1.6) half = 1.6;
+        rail = half > 2.7 && hash2((streetX * 4) | 0, (half * 8) | 0, 0x5A11) < 0.34 ? 1 : 0;
+      } else {
+        streetX = roadXC; half = roadXH - 1.4; if (half < 1.6) half = 1.6;
+        rail = half > 2.7 && hash2((streetX * 4) | 0, (half * 8) | 0, 0x5A11) < 0.34 ? 1 : 0;
+      }
+    }
+    var lane = wx - streetX;
     if (CFG.streetPeriod > 0) lane -= Math.round(lane / CFG.streetPeriod) * CFG.streetPeriod;
     var al = lane < 0 ? -lane : lane;
-    var half = CFG.half;
 
     var fl = dist < 22 ? 2 : (dist < 50 ? 1 : 0);
 
@@ -1221,15 +1262,12 @@ var CC = (function () {
     var rc = half * 0.55, rut = al - rc; if (rut < 0) rut = -rut;
     rut = 1 - clamp(rut / 0.62, 0, 1);
 
-    var lampK = 0;
-    if (fl > 0) {
-      var lj = Math.floor(wz / 13.5);
-      var lcl = (hash2(lj, 0, 0x1A3) < 0.5 ? 1 : -1) * (half - 0.55);
-      var lcz = lj * 13.5 + 3.4 + hash2(lj, 1, 0x1A3) * 6.6;
-      var dll = (lane - lcl) / 3.0, dlpz = (wz - lcz) / 4.1;
-      lampK = 1 - (dll * dll + dlpz * dlpz);
-      if (lampK < 0) lampK = 0; else lampK *= lampK;
-    }
+    var lj = Math.floor(wz / 13.5);
+    var lcl = (hash2(lj, 0, 0x1A3) < 0.5 ? 1 : -1) * (half - 0.55);
+    var lcz = lj * 13.5 + 3.4 + hash2(lj, 1, 0x1A3) * 6.6;
+    var dll = (lane - lcl) / 3.0, dlpz = (wz - lcz) / 4.1;
+    var lampK = 1 - (dll * dll + dlpz * dlpz);
+    if (lampK < 0) lampK = 0; else lampK *= lampK;
 
     mirNow = clamp(pd * 0.95 + sheet * (0.40 + rut * 0.26), 0, 1);
 
@@ -1244,8 +1282,13 @@ var CC = (function () {
     }
     wchNow = WATER[(hash2(Math.floor(wx * 2.3), Math.floor(wz * 1.1), 0x2E1) * WATER_N) | 0];
 
-    var xd = 1e9, xh = 0, xcv = 0, i, ad2;
-    if (CFG.xn > 0) {
+    var xd = 1e9, xh = 0, xcv = 0, ad2;
+    if (CFG.worldRoads) {
+
+      if (!useCross) { xd = roadZD; xh = roadZH - 1.4; xcv = roadZC; }
+      else { xd = roadXD; xh = roadXH - 1.4; xcv = roadXC; }
+      if (xh < 1.6) xh = 1.6;
+    } else if (CFG.xn > 0) {
 
       var xg = Math.round((wz - CFG.xz0) / CFG.xpitch);
       var xlo = xg - 1, xhi = xg + 1;
@@ -1258,7 +1301,7 @@ var CC = (function () {
     }
     var inX = xd < xh;
 
-    if (CFG.xn > 0) {
+    if (CFG.worldRoads || CFG.xn > 0) {
       if (inX) {
 
         if (al < half + xh && hash2((xcv * 2) | 0, 0, 0x2C9) < 0.40) {
@@ -1314,7 +1357,7 @@ var CC = (function () {
       }
     }
 
-    if (CFG.rail && !inX) {
+    if (rail && !inX) {
       var rg = al - 0.62; if (rg < 0) rg = -rg;
       var rg2 = al - 2.06; if (rg2 < 0) rg2 = -rg2;
       if (rg < 0.055 || rg2 < 0.055) {
@@ -1337,9 +1380,9 @@ var CC = (function () {
     if (!inX && al > half + 0.34) {
 
       mirNow *= 0.35; bounceNow = 0.05;
-      if (fl === 0) return rset(0, P.shadow, 0);
 
-      if (CFG.xn > 0 && xd > xh - 0.2 && xd < xh + 2.4 && al < half + 2.2) {
+      if (fl > 0 && (CFG.worldRoads || CFG.xn > 0) && xd > xh - 0.2 && xd < xh + 2.4 &&
+          al < half + 2.2) {
         var tp = hash2(Math.floor(wx * 3.4), Math.floor(wz * 3.4), 0x2D3);
         if (tp < 0.38) return rset(G_oo, P.slate, 15 + tp * 34);
         return rset(0, P.shadow, 0);
@@ -1420,9 +1463,9 @@ var CC = (function () {
     if (fl > 0 && (wz - Math.floor(wz / 4.0) * 4.0) < 0.10)
       return rset(G_DASH, P.slate, 16);
 
-    if (lampK > 0.05 && fl > 0) {
-      var lh = hash2(Math.floor(wx * (fl === 2 ? 2.1 : 1.0)),
-                     Math.floor(wz * (fl === 2 ? 2.1 : 1.0)), 0x1A5);
+    if (lampK > 0.05) {
+
+      var lh = hash2(Math.floor(wx), Math.floor(wz), 0x1A5);
       if (lh < 0.24 + lampK * 0.40)
         return rset(lh < 0.5 ? G_DOT : G_COMMA, P.amber,
                     112 + lampK * 118 + lh * 26 + mirNow * 44);
@@ -1446,8 +1489,6 @@ var CC = (function () {
                     wg < 0.055 ? 48 + mirNow * 50 : 8 + mirNow * 30 + wg * 14);
     }
 
-    if (fl === 0) return rset(0, P.shadow, 0);
-
     var qi = Math.floor(lane / 2.6), qj = Math.floor(wz / 3.4);
     var patch = hash2(qi, qj, 0x7A9) < 0.30;
     if (patch && fl === 2) {
@@ -1457,7 +1498,7 @@ var CC = (function () {
         return rset(el2 < 0.09 || el2 > 2.51 ? G_PIPE : G_DASH, P.slate, 13);
     }
 
-    if (fl === 1) {
+    if (fl < 2) {
       var mh = hash2(Math.floor(wx * 0.9), Math.floor(wz * 0.9), 0x12);
       return mh < 0.23 ? rset(mh < 0.11 ? G_DOT : G_COMMA, P.slate, 13 + mh * 40)
                        : rset(0, P.shadow, 0);
@@ -1593,69 +1634,43 @@ var CC = (function () {
     return sgset(s.glyph, s.hue, (172 + h * 66) * (h < 0.10 ? 0.3 : 1) * pulse);
   }
 
-  var swapFloor = 0;
-
-  var swapLatch = 0;
-
   var CFGARG = { grid: 8.0, streetX: 4.0, streetPeriod: 0, half: 3.1,
-                 horizon: 33.6, rows: 60, skyVScale: 1 };
+                 horizon: 33.6, rows: 60, skyVScale: 1, worldRoads: 0 };
 
   var SKY_NEUTRAL = 0.5625 / (2 * Math.tan(0.625));
-  function configureFor(city, camx, camz, fwx, fwz, horizon, rows, scale, cols) {
-    var cx = 4.0, hw = 3.1;
-    swapFloor = 0;
-    if (city && city.aveX) {
-      var k = Math.round(camx / city.AVE), m = Math.round(camz / city.CROSS);
-      var aC = 0, aW = 0, cC = 0, cW = 0, bA = 1e18, bC = 1e18, i, c, d;
-      for (i = k - 1; i <= k + 1; i++) {
-        c = city.aveX(i) + 0.5; d = camx - c; if (d < 0) d = -d;
-        if (d < bA) { bA = d; aC = c; aW = city.aveW(i) + 0.5; }
-      }
-      for (i = m - 1; i <= m + 1; i++) {
-        c = city.crossZ(i) + 0.5; d = camz - c; if (d < 0) d = -d;
-        if (d < bC) { bC = d; cC = c; cW = city.crossW(i) + 0.5; }
-      }
+  function configureFor(city, camx, camz, horizon, rows, scale, cols, far) {
+    var hasCity = city && city.aveX;
 
-      var onAve = bA <= aW, onCross = bC <= cW;
-      var afz = fwz < 0 ? -fwz : fwz, afx = fwx < 0 ? -fwx : fwx;
-      var want;
-      if (onCross && !onAve) want = 1;
-      else if (!onCross) want = 0;
-      else want = swapLatch ? (afz > afx * 1.35 ? 0 : 1)
-                            : (afx > afz * 1.35 ? 1 : 0);
-      swapLatch = want;
-      if (want) { swapFloor = 1; cx = cC; hw = cW; }
-      else { cx = aC; hw = aW; }
-      hw = hw - 1.4; if (hw < 1.6) hw = 1.6;
-    }
-
-    CFGARG.grid = 8.0; CFGARG.streetX = cx; CFGARG.streetPeriod = 0; CFGARG.half = hw;
+    CFGARG.grid = 8.0; CFGARG.streetX = 4.0; CFGARG.streetPeriod = hasCity ? 0 : 8.0;
+    CFGARG.half = 3.1; CFGARG.worldRoads = hasCity ? 1 : 0;
     CFGARG.horizon = horizon; CFGARG.rows = rows;
 
     CFGARG.skyVScale = (scale > 0 && cols > 0) ? (SKY_NEUTRAL * cols) / scale : 1;
     CC.Surf.configure(CFGARG);
-    loadCrossings(city, camx, camz);
+    loadRoads(city, camx, camz, far);
   }
 
-  function loadCrossings(city, camx, camz) {
+  function loadRoads(city, camx, camz, far) {
     var cf = CC.Surf.cfg;
-    if (!city || !city.aveX) { cf.xn = 0; return; }
-
-    var along = swapFloor ? camx : camz;
-    var pitch = swapFloor ? city.AVE : city.CROSS;
-    var n = 0, i, k0 = Math.round(along / pitch);
-
-    for (i = k0 - 1; i <= k0 + 6 && n < 8; i++) {
-      cf.xc[n] = (swapFloor ? city.aveX(i) : city.crossZ(i)) + 0.5;
-
-      var w = (swapFloor ? city.aveW(i) : city.crossW(i)) + 0.5 - 1.4;
-      cf.xw[n] = w < 1.6 ? 1.6 : w;
-      if (n === 0) cf.xz0 = cf.xc[0];
-      n++;
+    cf.an = 0; cf.cn = 0; cf.xn = 0;
+    if (!city || !city.aveX) return;
+    var pad = 9, i;
+    var a0 = Math.floor((camx - far - pad) / city.AVE) - 1;
+    var a1 = Math.ceil((camx + far + pad) / city.AVE) + 1;
+    cf.ai0 = a0; cf.apitch = city.AVE;
+    for (i = a0; i <= a1 && cf.an < cf.ac.length; i++) {
+      cf.ac[cf.an] = city.aveX(i) + 0.5;
+      cf.aw[cf.an] = city.aveW(i) + 0.5;
+      cf.an++;
     }
-    cf.xn = n;
-
-    cf.xpitch = pitch;
+    var c0 = Math.floor((camz - far - pad) / city.CROSS) - 1;
+    var c1 = Math.ceil((camz + far + pad) / city.CROSS) + 1;
+    cf.ci0 = c0; cf.cpitch = city.CROSS;
+    for (i = c0; i <= c1 && cf.cn < cf.cc.length; i++) {
+      cf.cc[cf.cn] = city.crossZ(i) + 0.5;
+      cf.cw[cf.cn] = city.crossW(i) + 0.5;
+      cf.cn++;
+    }
   }
 
   function floorRow(frame, i, r, rowC, ox, oz, dx, dz, len, horizon, scale, eyeY, t) {
@@ -1664,7 +1679,7 @@ var CC = (function () {
     if (den < 1e-3) { poke(frame, i, 0, P.shadow, 0, 1e6, 2); mirA[r] = 0; return; }
     var w = eyeY * scale / den, d = w * len;
     var px = ox + dx * w, pz = oz + dz * w;
-    var o = swapFloor ? Surf.floorTex(pz, px, d, t) : Surf.floorTex(px, pz, d, t);
+    var o = Surf.floorTex(px, pz, d, t);
     poke(frame, i, o.ch, o.col, Surf.fog(o.lum, d), d, 2);
 
     mirA[r] = o.mir; ripA[r] = o.rip; wchA[r] = o.wch;
@@ -1729,7 +1744,7 @@ var CC = (function () {
     var FAR = Surf.beginFrame ? Surf.beginFrame(t) : Surf.FOG_END;
 
     scratch(rows);
-    configureFor(city, ox, oz, fwx, fwz, horizon, rows, scale, cols);
+    configureFor(city, ox, oz, horizon, rows, scale, cols, FAR);
 
     var skyK = cols / 1.25;
 

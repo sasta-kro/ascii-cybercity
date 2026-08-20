@@ -84,22 +84,12 @@
     return sgset(s.glyph, s.hue, (172 + h * 66) * (h < 0.10 ? 0.3 : 1) * pulse);
   }
 
-  /* ---- the canyon the floor texture is drawn against ----------------------------------------
-   * surfaces.js models one street, running along +z, with its centreline at a world x. The city
-   * has two street directions and the walk uses both, so pick whichever one the camera is standing
-   * in and, for a cross street, hand floorTex its coordinates transposed — otherwise the kerbs and
-   * the centreline run across the view instead of away from it, and the road stops reading as a
-   * road at all.
-   * The kerb is also pulled 1.4 m in off the building line: city.js has the facades abutting the
-   * carriageway, and a kerb painted hard against a wall reads as a skirting board, not a street. */
-  var swapFloor = 0;
-  /* Latched across frames on purpose. A bare afx>afz comparison flips the ENTIRE floor texture
-   * space in one 16 ms frame the moment the heading crosses 45 deg inside an intersection —
-   * measured at +123% floor luminance and +18.9% of the whole frame on seed 1 frame 2176. The
-   * margin below makes the flip wait until the heading has clearly committed, which is the middle
-   * of the corner pan, where the whole image is already sliding ~2.4 columns per frame and the
-   * change is masked. */
-  var swapLatch = 0;
+  /* ---- the street lattice handed to the floor texture ----------------------------------------
+   * Floor samples are world positions, so their road identity must also come from world position.
+   * The former implementation selected one camera corridor and transposed the ENTIRE floor when a
+   * turn committed. A perpendicular road therefore had the wrong lamp and marking axes until the
+   * camera stepped onto it, followed by a one-frame redraw at the intersection. Load both visible
+   * street families once instead; surfaces.js chooses the local corridor for each sample. */
   /* The argument object for CC.Surf.configure(), hoisted and refilled in place. It used to be an
    * object literal built inside configureFor, which made it the last structural per-frame
    * allocation in the whole frame path — a V8 sampling heap profile over 900 frames at 260x100
@@ -108,86 +98,50 @@
    * fixed and known, so there is no reason to hand the collector a fresh one sixty times a second.
    * configure() copies these into CFG, so the scratch is never retained. */
   var CFGARG = { grid: 8.0, streetX: 4.0, streetPeriod: 0, half: 3.1,
-                 horizon: 33.6, rows: 60, skyVScale: 1 };
+                 horizon: 33.6, rows: 60, skyVScale: 1, worldRoads: 0 };
   /* One neutral-camera row, in the elevation units Surf.sky hashes on. cellAspect/2/tan(fov/2) at
    * the neutral fov 1.25 is what `scale` works out to per column, so dividing the live scale back
    * out gives 1.0 whenever the camera is at that fov and grows as it zooms in — which is what
    * makes the star field magnify under zoom instead of being re-dealt. */
   var SKY_NEUTRAL = 0.5625 / (2 * Math.tan(0.625));
-  function configureFor(city, camx, camz, fwx, fwz, horizon, rows, scale, cols) {
-    var cx = 4.0, hw = 3.1;
-    swapFloor = 0;
-    if (city && city.aveX) {
-      var k = Math.round(camx / city.AVE), m = Math.round(camz / city.CROSS);
-      var aC = 0, aW = 0, cC = 0, cW = 0, bA = 1e18, bC = 1e18, i, c, d;
-      for (i = k - 1; i <= k + 1; i++) {
-        c = city.aveX(i) + 0.5; d = camx - c; if (d < 0) d = -d;
-        if (d < bA) { bA = d; aC = c; aW = city.aveW(i) + 0.5; }
-      }
-      for (i = m - 1; i <= m + 1; i++) {
-        c = city.crossZ(i) + 0.5; d = camz - c; if (d < 0) d = -d;
-        if (d < bC) { bC = d; cC = c; cW = city.crossW(i) + 0.5; }
-      }
-      /* Standing in an intersection both are true, so the tiebreak is which way we are looking. */
-      var onAve = bA <= aW, onCross = bC <= cW;
-      var afz = fwz < 0 ? -fwz : fwz, afx = fwx < 0 ? -fwx : fwx;
-      var want;
-      if (onCross && !onAve) want = 1;
-      else if (!onCross) want = 0;
-      else want = swapLatch ? (afz > afx * 1.35 ? 0 : 1)    // 1.35 either way = a dead band the
-                            : (afx > afz * 1.35 ? 1 : 0);   // heading cannot chatter across
-      swapLatch = want;
-      if (want) { swapFloor = 1; cx = cC; hw = cW; }
-      else { cx = aC; hw = aW; }
-      hw = hw - 1.4; if (hw < 1.6) hw = 1.6;
-    }
+  function configureFor(city, camx, camz, horizon, rows, scale, cols, far) {
+    var hasCity = city && city.aveX;
     /* streetPeriod 0 disables the wrap: we know the real centreline, and a wrapped copy of the
      * road markings would surface on pavements and down alleys where there is no road. */
-    CFGARG.grid = 8.0; CFGARG.streetX = cx; CFGARG.streetPeriod = 0; CFGARG.half = hw;
+    CFGARG.grid = 8.0; CFGARG.streetX = 4.0; CFGARG.streetPeriod = hasCity ? 0 : 8.0;
+    CFGARG.half = 3.1; CFGARG.worldRoads = hasCity ? 1 : 0;
     CFGARG.horizon = horizon; CFGARG.rows = rows;
     /* Surf.sky hashes its vertical on an ELEVATION, and only the caster knows the projection that
      * turns a screen row into one. A guard for the degenerate case: a caller that hands us a zero
      * or absent scale must not put a NaN into every sky cell in the frame. */
     CFGARG.skyVScale = (scale > 0 && cols > 0) ? (SKY_NEUTRAL * cols) / scale : 1;
     CC.Surf.configure(CFGARG);
-    loadCrossings(city, camx, camz);
+    loadRoads(city, camx, camz, far);
   }
 
-  /* ---- where the cross streets cut the one we are standing in --------------------------------
-   * surfaces.js draws the junction — the crossing, the stop line, the box hatch, and the fact that
-   * the kerb STOPS — and it has no city to ask where a junction is, so the world pass loads them.
-   * They are handed over in the axis floorTex reads as wz, which is the transposed one when the
-   * camera has committed to a cross street: get that wrong and every crossing in the frame is
-   * painted down the road instead of across it.
-   *
-   * Written straight into the config's fixed-length arrays. Eight is comfortably more than the
-   * ~125 m of visible street can hold at a 26 m pitch, and allocating a fresh list per frame in
-   * the one function the whole world pass runs through is exactly the kind of garbage this
-   * renderer is built to avoid. */
-  function loadCrossings(city, camx, camz) {
+  /* Fixed arrays cover the camera's full fog circle. At the clearest weather the circle is just
+   * under 140 m, which fits at most twelve 26 m cross streets plus the two guards loaded here. */
+  function loadRoads(city, camx, camz, far) {
     var cf = CC.Surf.cfg;
-    if (!city || !city.aveX) { cf.xn = 0; return; }
-    /* Along the street we are ON, the streets that CROSS it are the other family. */
-    var along = swapFloor ? camx : camz;             // the coordinate floorTex sees as wz
-    var pitch = swapFloor ? city.AVE : city.CROSS;
-    var n = 0, i, k0 = Math.round(along / pitch);
-    /* One behind, six ahead: the frame only shows what is in front, and a junction just behind the
-     * camera still owns the kerb the camera is standing next to. */
-    for (i = k0 - 1; i <= k0 + 6 && n < 8; i++) {
-      cf.xc[n] = (swapFloor ? city.aveX(i) : city.crossZ(i)) + 0.5;
-      /* Same 1.4 m inset the kerb takes, for the same reason: city.js abuts the facades to the
-       * carriageway and a junction mouth measured to the building line swallows both pavements. */
-      var w = (swapFloor ? city.aveW(i) : city.crossW(i)) + 0.5 - 1.4;
-      cf.xw[n] = w < 1.6 ? 1.6 : w;
-      if (n === 0) cf.xz0 = cf.xc[0];
-      n++;
+    cf.an = 0; cf.cn = 0; cf.xn = 0;
+    if (!city || !city.aveX) return;
+    var pad = 9, i;
+    var a0 = Math.floor((camx - far - pad) / city.AVE) - 1;
+    var a1 = Math.ceil((camx + far + pad) / city.AVE) + 1;
+    cf.ai0 = a0; cf.apitch = city.AVE;
+    for (i = a0; i <= a1 && cf.an < cf.ac.length; i++) {
+      cf.ac[cf.an] = city.aveX(i) + 0.5;
+      cf.aw[cf.an] = city.aveW(i) + 0.5;
+      cf.an++;
     }
-    cf.xn = n;
-    /* The pitch is published with them so floorTex can INDEX the nearest entry instead of scanning
-     * all of them: it asks this question once per floor cell, which is twenty thousand times a
-     * frame, and city.js's jitter is bounded well under half a block so the arithmetic guess is
-     * never more than one slot out. */
-    cf.xpitch = pitch;
+    var c0 = Math.floor((camz - far - pad) / city.CROSS) - 1;
+    var c1 = Math.ceil((camz + far + pad) / city.CROSS) + 1;
+    cf.ci0 = c0; cf.cpitch = city.CROSS;
+    for (i = c0; i <= c1 && cf.cn < cf.cc.length; i++) {
+      cf.cc[cf.cn] = city.crossZ(i) + 0.5;
+      cf.cw[cf.cn] = city.crossW(i) + 0.5;
+      cf.cn++;
+    }
   }
 
   /* ---- floor by inverse projection ----------------------------------------------------------
@@ -201,7 +155,7 @@
     if (den < 1e-3) { poke(frame, i, 0, P.shadow, 0, 1e6, 2); mirA[r] = 0; return; }
     var w = eyeY * scale / den, d = w * len;
     var px = ox + dx * w, pz = oz + dz * w;
-    var o = swapFloor ? Surf.floorTex(pz, px, d, t) : Surf.floorTex(px, pz, d, t);
+    var o = Surf.floorTex(px, pz, d, t);
     poke(frame, i, o.ch, o.col, Surf.fog(o.lum, d), d, 2);
     /* Parked for the reflect pass at the end of the column. It cannot run here: the wall this
      * cell is going to mirror has not been painted yet. */
@@ -344,7 +298,7 @@
     var FAR = Surf.beginFrame ? Surf.beginFrame(t) : Surf.FOG_END;
 
     scratch(rows);
-    configureFor(city, ox, oz, fwx, fwz, horizon, rows, scale, cols);
+    configureFor(city, ox, oz, horizon, rows, scale, cols, FAR);
     /* Stars are fixed to the world, not to the view; without this they ride the camera round.
      *
      * What Surf.sky is keyed on has to be an ANGLE, and the old `skyOff = (yaw/fov)*cols` added to
